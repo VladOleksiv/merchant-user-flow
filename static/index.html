@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Store Checkout</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="logo" href="/">Demo Store</a>
+  <nav><a href="/">Shop</a><a href="/orders">Orders &amp; logs</a></nav>
+</div></header>
+<main>
+  <div id="banner" class="banner hidden"></div>
+  <h1>Checkout</h1>
+  <p class="sub">Test merchant for the card payment flow: on-site card form (H2H) or hosted payment page (HPP).</p>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>1. Order</h2>
+        <div class="products" id="products"></div>
+        <div class="row">
+          <div><label for="amount">Amount</label><input id="amount" inputmode="decimal" value="5.00"></div>
+          <div><label for="currency">Currency</label>
+            <select id="currency"><option selected>EUR</option><option>USD</option><option>GBP</option><option>UAH</option><option>PLN</option></select>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2. Customer</h2>
+        <div class="row">
+          <div><label for="first_name">First name</label><input id="first_name" value="John"></div>
+          <div><label for="last_name">Last name</label><input id="last_name" value="Doe"></div>
+        </div>
+        <div class="row">
+          <div><label for="email">Email</label><input id="email" type="email" value="john.doe@example.com"></div>
+          <div><label for="phone">Phone</label><input id="phone" value="380501234567"></div>
+        </div>
+        <div class="row">
+          <div><label for="country">Country (ISO 3166-1)</label><input id="country" value="UA" maxlength="2"></div>
+          <div><label for="city">City</label><input id="city" value="Kyiv"></div>
+        </div>
+        <div class="row">
+          <div><label for="address">Address</label><input id="address" value="Khreshchatyk St, 1"></div>
+          <div><label for="zip_code">ZIP</label><input id="zip_code" value="01001"></div>
+        </div>
+        <label for="identifier">Customer ID in merchant system</label><input id="identifier" value="customer-001">
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>3. Payment</h2>
+        <div class="tabs">
+          <button type="button" class="tab active" data-mode="h2h"><span class="t">Card on site</span><span class="d">H2H: card form on merchant page</span></button>
+          <button type="button" class="tab" data-mode="hpp"><span class="t">Payment page</span><span class="d">HPP: redirect to hosted checkout</span></button>
+        </div>
+
+        <div id="h2h-form">
+          <label for="pan">Card number</label>
+          <input id="pan" inputmode="numeric" autocomplete="cc-number" placeholder="4242 4242 4242 4242">
+          <label for="holder_name">Card holder</label>
+          <input id="holder_name" autocomplete="cc-name" value="JOHN DOE">
+          <div class="row">
+            <div><label for="exp_month">Month</label><input id="exp_month" inputmode="numeric" placeholder="MM" maxlength="2" value="12"></div>
+            <div><label for="exp_year">Year</label><input id="exp_year" inputmode="numeric" placeholder="YYYY" maxlength="4" value="2030"></div>
+            <div><label for="cvv">CVV</label><input id="cvv" inputmode="numeric" maxlength="4" value="123" autocomplete="cc-csc"></div>
+          </div>
+        </div>
+
+        <div id="hpp-form" class="hidden">
+          <p class="hint">After you press Pay, the customer is redirected to the hosted payment page to enter card details,
+            then returned to the order page.</p>
+          <label for="locale">Payment page language</label>
+          <select id="locale"><option value="en">English</option><option value="uk">Ukrainian</option><option value="">Default</option></select>
+        </div>
+
+        <div class="total"><span>Total</span><span id="total"></span></div>
+        <button class="btn wide" id="pay">Pay</button>
+        <div class="error" id="error"></div>
+      </div>
+
+      <div class="card" id="testcards-card">
+        <h2>Test cards</h2>
+        <p class="hint">From the Flexify docs. Any CVV and future expiry. Click a row to fill the H2H form.</p>
+        <div class="table-wrap"><table class="testcards">
+          <thead><tr><th>Number</th><th>3DS</th><th>Expected</th></tr></thead>
+          <tbody id="testcards"></tbody>
+        </table></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+const PRODUCTS = [
+  { name: 'T-shirt', amount: '5.00' },
+  { name: 'Sneakers', amount: '89.90' },
+  { name: 'Gift card', amount: '10.00' },
+];
+const TEST_CARDS = [
+  ['4242424242424242', '-', 'success'],
+  ['5352783000000210', 'V1', 'success'],
+  ['4012000000003010', 'V2 frictionless', 'success'],
+  ['4012000000003119', 'V2 challenge', 'success'],
+  ['4012000000003242', 'V2 challenge', 'declined 1140'],
+  ['4012000000004240', '-', 'declined 1110'],
+  ['4012000000006740', '-', 'declined 1120'],
+];
+const MOCK_CARDS = [
+  ['5060990580000217499', 'OTP (mock, code 123456)', 'success'],
+  ['4111111111111111', 'challenge via check (mock)', 'success'],
+];
+let mode = 'h2h';
+let product = PRODUCTS[0].name;
+const $ = id => document.getElementById(id);
+
+function renderProducts() {
+  $('products').innerHTML = PRODUCTS.map((p, i) =>
+    '<div class="product' + (p.name === product ? ' selected' : '') + '" data-i="' + i + '">' +
+    '<div class="name">' + esc(p.name) + '</div><div class="price">' + esc(p.amount) + '</div></div>').join('');
+  document.querySelectorAll('.product').forEach(el => el.onclick = () => {
+    const p = PRODUCTS[+el.dataset.i];
+    product = p.name;
+    $('amount').value = p.amount;
+    renderProducts();
+    renderTotal();
+  });
+}
+
+function renderTotal() {
+  $('total').textContent = ($('amount').value || '0') + ' ' + $('currency').value;
+}
+
+function renderCards(list) {
+  $('testcards').innerHTML = list.map(c =>
+    '<tr data-pan="' + c[0] + '"><td class="mono">' + c[0] + '</td><td>' + esc(c[1]) + '</td><td>' + esc(c[2]) + '</td></tr>').join('');
+  document.querySelectorAll('#testcards tr').forEach(tr => tr.onclick = () => {
+    $('pan').value = tr.dataset.pan.replace(/(\d{4})(?=\d)/g, '$1 ');
+    if (mode !== 'h2h') document.querySelector('.tab[data-mode=h2h]').click();
+  });
+}
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  mode = t.dataset.mode;
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  $('h2h-form').classList.toggle('hidden', mode !== 'h2h');
+  $('hpp-form').classList.toggle('hidden', mode !== 'hpp');
+});
+$('amount').oninput = renderTotal;
+$('currency').onchange = renderTotal;
+$('pan').oninput = e => {
+  e.target.value = e.target.value.replace(/\D/g, '').slice(0, 19).replace(/(\d{4})(?=\d)/g, '$1 ');
+};
+
+function customer() {
+  const c = {};
+  ['identifier', 'email', 'phone', 'first_name', 'last_name', 'country', 'city', 'address', 'zip_code']
+    .forEach(k => c[k] = $(k).value.trim());
+  return c;
+}
+
+$('pay').onclick = async () => {
+  $('error').textContent = '';
+  $('pay').disabled = true;
+  $('pay').textContent = 'Processing...';
+  const base = { product, amount: $('amount').value, currency: $('currency').value, customer: customer() };
+  try {
+    let res;
+    if (mode === 'h2h') {
+      res = await api('/api/h2h/pay', Object.assign(base, {
+        card: {
+          pan: $('pan').value, holder_name: $('holder_name').value, cvv: $('cvv').value,
+          exp_month: $('exp_month').value, exp_year: $('exp_year').value,
+        },
+        browser: browserInfo(),
+      }));
+    } else {
+      res = await api('/api/hpp/create', Object.assign(base, { locale: $('locale').value }));
+    }
+    window.location.href = res.next === 'redirect' ? res.url : res.url + '?go=1';
+  } catch (e) {
+    $('error').textContent = e.message;
+    $('pay').disabled = false;
+    $('pay').textContent = 'Pay';
+  }
+};
+
+// Back navigation restores the page from bfcache with the button still in "Processing..."
+window.addEventListener('pageshow', () => {
+  $('pay').disabled = false;
+  $('pay').textContent = 'Pay';
+});
+
+renderProducts();
+renderTotal();
+renderCards(TEST_CARDS);
+showModeBanner($('banner')).then(cfg => { if (cfg && cfg.mock) renderCards(TEST_CARDS.concat(MOCK_CARDS)); });
+</script>
+</body>
+</html>

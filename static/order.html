@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order Status</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="logo" href="/">Demo Store</a>
+  <nav><a href="/">Shop</a><a href="/orders">Orders &amp; logs</a></nav>
+</div></header>
+<main>
+  <div id="banner" class="banner hidden"></div>
+  <div id="notice" class="banner hidden"></div>
+
+  <div class="card">
+    <div class="status-hero">
+      <span class="big" id="headline">Loading...</span>
+      <span id="status"></span>
+      <span id="spinner" class="spinner hidden"></span>
+    </div>
+    <p class="sub" id="subline"></p>
+    <dl class="kv" id="details"></dl>
+    <div class="actions">
+      <button class="btn secondary" id="check">Check status</button>
+      <a class="btn hidden" id="go3ds">Continue to 3-D Secure</a>
+      <a class="btn hidden" id="gocheckout">Open payment page</a>
+      <a class="btn secondary" href="/">New payment</a>
+    </div>
+    <div class="error" id="error"></div>
+  </div>
+
+  <div class="card hidden" id="challenge-card">
+    <h2 id="challenge-title">Additional verification</h2>
+    <form id="challenge-form"></form>
+  </div>
+
+  <div class="card hidden" id="post-card">
+    <h2>After payment</h2>
+    <div id="refund-block" class="hidden">
+      <p class="hint">Full refund of a successful payment (<span class="mono">POST /v1/refund</span>).</p>
+      <button class="btn secondary" id="refund">Refund</button>
+    </div>
+    <div id="refunds"></div>
+    <div id="repeat-block" class="hidden" style="margin-top:16px">
+      <p class="hint">Repeat payment with the saved card token (<span class="mono">mode: token</span>).</p>
+      <div class="row" style="max-width:360px">
+        <div><label for="repeat-amount">Amount</label><input id="repeat-amount"></div>
+        <div><label for="repeat-cvv">CVV (if required)</label><input id="repeat-cvv" maxlength="4" inputmode="numeric"></div>
+      </div>
+      <div class="actions"><button class="btn secondary" id="repeat">Pay again with saved card</button></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Gateway log</h2>
+    <p class="hint">Requests, responses and callbacks for this order. Card number and CVV are masked.</p>
+    <div id="events"></div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const ref = location.pathname.split('/').pop();
+const params = new URLSearchParams(location.search);
+let order = null;
+let polling = null;
+let pollUntil = Date.now() + 3 * 60 * 1000;
+let autoRedirected = false;
+const openEvents = new Set();
+
+const CHALLENGE_FORMS = {
+  otp: { title: 'Enter the one-time code', fields: [['otp', 'Code sent by SMS/email']], resend: true },
+  card_pin: { title: 'Enter card PIN', fields: [['card_pin', 'Card PIN']] },
+  address_verification: { title: 'Confirm billing address', fields: [
+    ['country', 'Country'], ['state_code', 'State'], ['city', 'City'], ['address', 'Address'], ['zip_code', 'ZIP']] },
+  phone_verification: { title: 'Confirm phone number', fields: [['phone', 'Phone linked to the account']] },
+};
+
+function headline(o) {
+  if (o.status === 'success') return 'Payment successful';
+  if (['declined', 'failed'].includes(o.status)) return 'Payment declined';
+  if (o.status === 'error') return 'Payment error';
+  if (o.status === 'expired') return 'Payment expired';
+  return 'Payment in progress';
+}
+
+function render(o) {
+  order = o;
+  $('headline').textContent = headline(o);
+  $('status').innerHTML = badge(o.status);
+  $('subline').textContent = 'Order ' + o.reference + ' · ' + (o.integration === 'hpp' ? 'HPP (hosted payment page)' : 'H2H (card on site)') +
+    (o.mode === 'token' ? ' · token payment' : '');
+  const rows = [
+    ['Amount', o.amount + ' ' + o.currency],
+    ['Product', o.product],
+    ['Reference', '<span class="mono">' + esc(o.reference) + '</span>'],
+  ];
+  if (o.identifier) rows.push(['Gateway ID', '<span class="mono">' + esc(o.identifier) + '</span>']);
+  if (o.payment_identifier && o.payment_identifier !== o.identifier) rows.push(['Payment ID', '<span class="mono">' + esc(o.payment_identifier) + '</span>']);
+  if (o.card) rows.push(['Card', esc((o.card.brand || '') + ' ' + (o.card.bin || '') + '…' + (o.card.last_4 || ''))]);
+  if (o.error_code) rows.push(['Error', esc(o.error_code + ' ' + (o.error_reason || ''))]);
+  else if (o.error_reason) rows.push(['Note', esc(o.error_reason)]);
+  if (o.parent_reference) rows.push(['Parent order', '<a href="/order/' + esc(o.parent_reference) + '">' + esc(o.parent_reference) + '</a>']);
+  rows.push(['Updated', fmtTime(o.updated_at)]);
+  $('details').innerHTML = rows.map(r => '<dt>' + r[0] + '</dt><dd>' + (r[0] === 'Product' || r[0] === 'Amount' ? esc(r[1]) : r[1]) + '</dd>').join('');
+
+  const ch = o.challenge;
+  const redirect = o.status === 'pending' && ch && ch.challenge_type === 'redirect';
+  $('go3ds').classList.toggle('hidden', !redirect);
+  if (redirect) {
+    $('go3ds').href = ch.challenge_redirect.url;
+    if (params.get('go') && !autoRedirected) { autoRedirected = true; location.href = ch.challenge_redirect.url; }
+  }
+  const checkoutOpen = o.integration === 'hpp' && ['new', 'opened'].includes(o.status) && o.checkout_url;
+  $('gocheckout').classList.toggle('hidden', !checkoutOpen);
+  if (checkoutOpen) $('gocheckout').href = o.checkout_url;
+  renderChallenge(o);
+
+  const showPost = o.status === 'success' || o.refunds.length;
+  $('post-card').classList.toggle('hidden', !showPost);
+  $('refund-block').classList.toggle('hidden', o.status !== 'success');
+  $('repeat-block').classList.toggle('hidden', !(o.status === 'success' && o.has_token));
+  if (!$('repeat-amount').value) $('repeat-amount').value = o.amount;
+  $('refunds').innerHTML = o.refunds.length ? '<div class="table-wrap"><table><thead><tr><th>Refund ID</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>' +
+    o.refunds.map(r => '<tr><td class="mono">' + esc(r.identifier) + '</td><td>' + esc((r.amount || '') + ' ' + (r.currency || '')) +
+      '</td><td>' + badge(r.status) + (r.error_reason ? ' ' + esc(r.error_reason) : '') +
+      '</td><td><button class="btn secondary" data-refund="' + esc(r.identifier) + '">Check</button></td></tr>').join('') +
+    '</tbody></table></div>' : '';
+  document.querySelectorAll('[data-refund]').forEach(b => b.onclick = () => run(() => api('/api/refunds/' + b.dataset.refund + '/check', {})));
+
+  renderEvents(o.events || []);
+  const waiting = !o.final || o.refunds.some(r => !['success', 'declined', 'failed', 'error', 'expired'].includes(r.status));
+  $('spinner').classList.toggle('hidden', !(waiting && polling));
+}
+
+function renderChallenge(o) {
+  const ch = o.challenge;
+  const spec = o.status === 'pending' && ch && CHALLENGE_FORMS[ch.challenge_type];
+  $('challenge-card').classList.toggle('hidden', !spec);
+  if (!spec) return;
+  const form = $('challenge-form');
+  if (form.dataset.type === ch.challenge_type) return;
+  form.dataset.type = ch.challenge_type;
+  $('challenge-title').textContent = spec.title;
+  form.innerHTML = spec.fields.map(f => '<label for="ch-' + f[0] + '">' + esc(f[1]) + '</label><input id="ch-' + f[0] + '" name="' + f[0] + '">').join('') +
+    '<div class="actions"><button class="btn">Submit</button>' +
+    (spec.resend ? '<button type="button" class="btn secondary" id="resend">Resend code</button>' : '') + '</div>';
+  form.onsubmit = e => {
+    e.preventDefault();
+    const body = { type: ch.challenge_type };
+    spec.fields.forEach(f => body[f[0]] = form.elements[f[0]].value);
+    form.dataset.type = '';
+    run(async () => { await api('/api/orders/' + ref + '/challenge', body); return api('/api/orders/' + ref); });
+  };
+  if (spec.resend) $('resend').onclick = () => run(async () => {
+    await api('/api/orders/' + ref + '/challenge', { type: 'otp_resend' });
+    return api('/api/orders/' + ref);
+  });
+}
+
+function renderEvents(events) {
+  $('events').innerHTML = events.length ? events.slice().reverse().map(ev =>
+    '<details class="event" data-id="' + ev.id + '"' + (openEvents.has(String(ev.id)) ? ' open' : '') + '><summary><span class="kind ' + esc(ev.kind) + '">' + esc(ev.kind) +
+    '</span><span>' + esc(ev.title) + '</span><time>' + fmtTime(ev.created_at) + '</time></summary>' +
+    '<pre class="json">' + esc(JSON.stringify(ev.data, null, 2)) + '</pre></details>').join('') : '<p class="hint">No events yet.</p>';
+  document.querySelectorAll('.event').forEach(d => d.ontoggle = () => {
+    if (d.open) openEvents.add(d.dataset.id); else openEvents.delete(d.dataset.id);
+  });
+}
+
+async function run(fn) {
+  $('error').textContent = '';
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  try { render(await fn()); } catch (e) { $('error').textContent = e.message; }
+  document.querySelectorAll('button').forEach(b => b.disabled = false);
+}
+
+function startPolling() {
+  if (polling) return;
+  pollUntil = Date.now() + 3 * 60 * 1000;
+  polling = setInterval(async () => {
+    if (Date.now() > pollUntil) { clearInterval(polling); polling = null; $('spinner').classList.add('hidden'); return; }
+    try {
+      const o = await api('/api/orders/' + ref + '/check', {});
+      render(o);
+      const refundsPending = o.refunds.some(r => r.status === 'pending');
+      if (o.final && !refundsPending) { clearInterval(polling); polling = null; render(o); }
+    } catch (e) { /* keep polling */ }
+  }, 4000);
+}
+
+$('check').onclick = () => run(() => api('/api/orders/' + ref + '/check', {}));
+$('refund').onclick = () => run(async () => { const o = await api('/api/orders/' + ref + '/refund', {}); startPolling(); return o; });
+$('repeat').onclick = async () => {
+  $('error').textContent = '';
+  try {
+    const res = await api('/api/orders/' + ref + '/repeat', {
+      amount: $('repeat-amount').value, cvv: $('repeat-cvv').value, browser: browserInfo(),
+    });
+    location.href = res.next === 'redirect' ? res.url : res.url + '?go=1';
+  } catch (e) { $('error').textContent = e.message; }
+};
+
+if (params.get('cancelled')) {
+  $('notice').textContent = 'The customer cancelled payment on the hosted payment page.';
+  $('notice').className = 'banner warn';
+} else if (params.get('return')) {
+  $('notice').textContent = 'Customer returned from the payment/3-D Secure page. The final status comes from the callback or a status check.';
+  $('notice').className = 'banner';
+}
+
+showModeBanner($('banner'));
+(async () => {
+  try {
+    const o = await api('/api/orders/' + ref);
+    render(o);
+    if (!o.final) {
+      render(await api('/api/orders/' + ref + '/check', {}));
+      if (!order.final) startPolling();
+    }
+  } catch (e) {
+    $('headline').textContent = 'Order not found';
+    $('error').textContent = e.message;
+  }
+})();
+</script>
+</body>
+</html>

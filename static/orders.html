@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orders and Logs</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="logo" href="/">Demo Store</a>
+  <nav><a href="/">Shop</a><a href="/orders">Orders &amp; logs</a></nav>
+</div></header>
+<main>
+  <div id="banner" class="banner hidden"></div>
+  <h1>Orders</h1>
+  <p class="sub">All test payments. Open an order to see its full gateway log.</p>
+  <div class="card table-wrap">
+    <table>
+      <thead><tr><th>Created</th><th>Reference</th><th>Flow</th><th>Amount</th><th>Status</th><th>Error</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="hint">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+showModeBanner(document.getElementById('banner'));
+api('/api/orders').then(d => {
+  document.getElementById('rows').innerHTML = d.orders.length ? d.orders.map(o =>
+    '<tr><td>' + fmtTime(o.created_at) + '</td><td class="mono"><a href="/order/' + esc(o.reference) + '">' + esc(o.reference) +
+    '</a></td><td>' + esc(o.integration.toUpperCase() + (o.mode === 'token' ? ' token' : '')) + '</td><td>' + esc(o.amount + ' ' + o.currency) +
+    '</td><td>' + badge(o.status) + '</td><td>' + esc(o.error_code ? o.error_code + ' ' + (o.error_reason || '') : '') + '</td></tr>').join('')
+    : '<tr><td colspan="6" class="hint">No orders yet.</td></tr>';
+});
+</script>
+</body>
+</html>
